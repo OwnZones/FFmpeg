@@ -266,6 +266,9 @@ typedef struct MXFIndexTable {
 } MXFIndexTable;
 
 typedef struct MXFContext {
+    AVIOContext *outputCache;
+    AVIOContext *inputCache;
+
     const AVClass *class;     /**< Class for private options. */
     MXFPartition *partitions;
     unsigned partitions_count;
@@ -1405,8 +1408,116 @@ static MXFWrappingScheme mxf_get_wrapping_kind(UID *essence_container_ul)
     return UnknownWrapped;
 }
 
+
+static void dump_sorted_table_segments(MXFContext *mxf, int *nb_sorted_segments, MXFIndexTableSegment ***sorted_segments)
+{
+
+    // create a new avio context
+    AVIOContext *cache = mxf->outputCache;
+
+    // write the number of segments
+    fprintf(stdout, "\n!%d\n", *nb_sorted_segments);
+    avio_wb32(cache, *nb_sorted_segments);
+    for (int i = 0; i < *nb_sorted_segments; i++)
+    {
+        MXFIndexTableSegment segment = **sorted_segments[i];
+
+        // edit_unit_byte_count
+        avio_wb32(cache, segment.edit_unit_byte_count);
+        // index_sid
+        avio_wb32(cache, segment.index_sid);
+        // body_sid
+        avio_wb32(cache, segment.body_sid);
+
+        // index edit rate
+        avio_wb32(cache, segment.index_edit_rate.den);
+        avio_wb32(cache, segment.index_edit_rate.num);
+
+        // index_start_position
+        avio_wb64(cache, segment.index_start_position);
+        avio_wb64(cache, segment.index_duration);
+
+        // nb_index_entries
+        avio_wb32(cache, segment.nb_index_entries);
+
+        for (int j = 0; j < segment.nb_index_entries; j++)
+        {
+            // temporal_offset_entries
+            avio_w8(cache, segment.temporal_offset_entries[j]);
+            // flag_entries
+            avio_wb32(cache, segment.flag_entries[j]);
+            // stream_offset_entries
+            avio_wb64(cache, segment.stream_offset_entries[j]);
+        }
+    }
+
+    // close avio context
+    avio_close(cache);
+}
+
+static void get_sorted_table_segments_from_cache(MXFContext *mxf, int *nb_sorted_segments, MXFIndexTableSegment ***sorted_segments) {
+    AVIOContext *cache = mxf->inputCache;
+
+    *nb_sorted_segments = avio_rb32(cache);
+    *sorted_segments  = av_calloc(*nb_sorted_segments, sizeof(**sorted_segments));
+
+    for (int i = 0; i < *nb_sorted_segments; i++) {
+        MXFIndexTableSegment segment;
+        segment.type = IndexTableSegment;
+        UID a = { 0x06,0x0e,0x2b,0x34,0x02,0x53,0x01,0x01,0x0d,0x01,0x02,0x01,0x01,0x10,0x01,0x00 };
+        memcpy(segment.uid, a, 16);
+
+        // edit_unit_byte_count
+        segment.edit_unit_byte_count = avio_rb32(cache);
+        // index_sid
+        segment.index_sid = avio_rb32(cache);
+        // body_sid
+        segment.body_sid = avio_rb32(cache);
+
+        // index edit rate
+        segment.index_edit_rate.den = avio_rb32(cache);
+        segment.index_edit_rate.num = avio_rb32(cache);
+
+        // index_start_position
+        segment.index_start_position = avio_rb64(cache);
+        segment.index_duration = avio_rb64(cache);
+
+        // nb_index_entries
+        segment.nb_index_entries = avio_rb32(cache);
+
+        segment.temporal_offset_entries = av_calloc(segment.nb_index_entries, sizeof(*segment.temporal_offset_entries));
+        segment.flag_entries = av_calloc(segment.nb_index_entries, sizeof(*segment.flag_entries));
+        segment.stream_offset_entries = av_calloc(segment.nb_index_entries, sizeof(*segment.stream_offset_entries));
+
+//        fprintf(stdout, "\nedit_unit_byte_count %d\n", segment.edit_unit_byte_count);
+//        fprintf(stdout, "\nindex_sid %d\n", segment.index_sid);
+//        fprintf(stdout, "\nbody_sid %d\n", segment.body_sid);
+//        fprintf(stdout, "\nindex_edit_rate.den %d\n", segment.index_edit_rate.den);
+//        fprintf(stdout, "\nindex_edit_rate.num %d\n", segment.index_edit_rate.num);
+        fprintf(stdout, "\nindex_start_position %lld\n", segment.index_start_position);
+        fprintf(stdout, "\nindex_duration %lld\n", segment.index_duration);
+        fprintf(stdout, "\nnb_index_entries %d\n", segment.nb_index_entries);
+
+        for (int j = 0; j < segment.nb_index_entries; j++) {
+            segment.temporal_offset_entries[j] = avio_r8(cache);
+            segment.flag_entries[j] = avio_rb32(cache);
+            segment.stream_offset_entries[j] = avio_rb64(cache);
+
+//            fprintf(stdout, "temporal_offset_entries %d ", segment.temporal_offset_entries[j]);
+//            fprintf(stdout, "flag_entries %d ", segment.flag_entries[j]);
+//            fprintf(stdout, "stream_offset_entries %lld\n", segment.stream_offset_entries[j]);
+        }
+
+        (*sorted_segments)[i] = &segment;
+    }
+}
+
 static int mxf_get_sorted_table_segments(MXFContext *mxf, int *nb_sorted_segments, MXFIndexTableSegment ***sorted_segments)
 {
+
+    get_sorted_table_segments_from_cache(mxf, nb_sorted_segments, sorted_segments);
+    return 0;
+
     int i, j, nb_segments = 0;
     MXFIndexTableSegment **unsorted_segments;
     int last_body_sid = -1, last_index_sid = -1, last_index_start = -1;
@@ -2809,7 +2920,10 @@ static int mxf_seek_to_previous_partition(MXFContext *mxf)
 
     /* seek to previous partition */
     current_partition_ofs = mxf->current_partition->pack_ofs;   //includes run-in
-    avio_seek(pb, mxf->run_in + mxf->current_partition->previous_partition, SEEK_SET);
+
+//    avio_seek(pb, mxf->run_in + mxf->current_partition->previous_partition, SEEK_SET);
+    avio_seek(pb, mxf->run_in + 0, SEEK_SET);
+
     mxf->current_partition = NULL;
 
     av_log(mxf->fc, AV_LOG_TRACE, "seeking to previous partition\n");
@@ -3122,6 +3236,11 @@ end:
 static int mxf_read_header(AVFormatContext *s)
 {
     MXFContext *mxf = s->priv_data;
+
+    //    avio_open(&mxf->outputCache, "/Users/alexcazacu/Desktop/segments.txt", AVIO_FLAG_WRITE);
+    avio_open(&mxf->inputCache, "/Users/alexcazacu/Desktop/segments.txt", AVIO_FLAG_READ);
+
+
     KLVPacket klv;
     int64_t essence_offset = 0;
     int ret;
@@ -3195,6 +3314,54 @@ static int mxf_read_header(AVFormatContext *s)
             avio_skip(s->pb, klv.length);
         }
     }
+
+
+    for (int i = 0; i < mxf->partitions_count; i++) {
+        MXFPartition partition;
+        partition.closed = avio_rb32(cache);
+        partition.complete = avio_rb32(cache);
+        partition.type = avio_r8(cache);
+        partition.previous_partition = avio_rb64(cache);
+        partition.index_sid = avio_rb32(cache);
+        partition.body_sid = avio_rb32(cache);
+        partition.this_partition = avio_rb64(cache);
+        partition.essence_offset = avio_rb64(cache);
+        partition.essence_length = avio_rb64(cache);
+        partition.kag_size = avio_rb32(cache);
+        partition.header_byte_count = avio_rb64(cache);
+        partition.index_byte_count = avio_rb64(cache);
+        partition.pack_length = avio_rb32(cache);
+        partition.pack_ofs = avio_rb64(cache);
+        partition.body_offset = avio_rb64(cache);
+
+        mxf->partitions[i] = partition;
+    }
+
+
+
+    // dump partitions count
+//    AVIOContext *cache = mxf->outputCache;
+//    avio_wb32(cache, mxf->partitions_count);
+//    for (int i = 0; i < mxf->partitions_count; i++) {
+//        MXFPartition partition = mxf->partitions[i];
+//        avio_wb32(cache, partition.closed);
+//        avio_wb32(cache, partition.complete);
+//        avio_w8(cache, partition.type);
+//        avio_wb64(cache, partition.previous_partition);
+//        avio_wb32(cache, partition.index_sid);
+//        avio_wb32(cache, partition.body_sid);
+//        avio_wb64(cache, partition.this_partition);
+//        avio_wb64(cache, partition.essence_offset);
+//        avio_wb64(cache, partition.essence_length);
+//        avio_wb32(cache, partition.kag_size);
+//        avio_wb64(cache, partition.header_byte_count);
+//        avio_wb64(cache, partition.index_byte_count);
+//        avio_wb32(cache, partition.pack_length);
+//        avio_wb64(cache, partition.pack_ofs);
+//        avio_wb64(cache, partition.body_offset);
+//    }
+
+
     /* FIXME avoid seek */
     if (!essence_offset)  {
         av_log(s, AV_LOG_ERROR, "no essence\n");

@@ -33,14 +33,14 @@
 #include "url.h"
 #include <stdarg.h>
 
-#define IO_BUFFER_SIZE 32768
+#define IO_BUFFER_SIZE 2 * 1024 * 1024
 
 /**
  * Do seeks within this distance ahead of the current buffer by skipping
  * data instead of calling the protocol seek function, for seekable
  * protocols.
  */
-#define SHORT_SEEK_THRESHOLD 4096
+#define SHORT_SEEK_THRESHOLD 1024 * 1024
 
 typedef struct AVIOInternal {
     URLContext *h;

@@ -3230,7 +3230,11 @@ static int mxf_read_header(AVFormatContext *s)
     if (strlen(mxf->save_mxf_cache) > 0) {
         avio_open(&mxf->cache, mxf->save_mxf_cache, AVIO_FLAG_WRITE);
     } else if (strlen(mxf->use_mxf_cache) > 0) {
-        avio_open(&mxf->cache, mxf->use_mxf_cache, AVIO_FLAG_READ);
+        int avio_open_error = avio_open(&mxf->cache, mxf->use_mxf_cache, AVIO_FLAG_READ);
+        if (avio_open_error != 0) {
+            // if 'mxf->use_mxf_cache' can't be open, set it to empty string in order to disable the cache
+            mxf->use_mxf_cache[0] = '\0';
+        }
     }
 
     KLVPacket klv;

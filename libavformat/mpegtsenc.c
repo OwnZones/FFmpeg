@@ -106,6 +106,7 @@ typedef struct MpegTSWrite {
 #define MPEGTS_FLAG_PAT_PMT_AT_FRAMES           0x04
 #define MPEGTS_FLAG_SYSTEM_B        0x08
 #define MPEGTS_FLAG_DISCONT         0x10
+#define MPEGTS_CABLE_LABS           0x20
     int flags;
     int copyts;
     int tables_version;
@@ -406,6 +407,29 @@ static int mpegts_write_pmt(AVFormatContext *s, MpegTSService *service)
                 *q++=0x6a; // AC3 descriptor see A038 DVB SI
                 *q++=1; // 1 byte, all flags sets to 0
                 *q++=0; // omit all fields...
+
+            }
+
+            if (st->codecpar->codec_id==AV_CODEC_ID_AC3
+                && !(ts->flags & MPEGTS_FLAG_SYSTEM_B)
+                && (ts->flags & MPEGTS_CABLE_LABS)) {
+                *q++=STREAM_TYPE_PRIVATE_SECTION;
+                *q++=4;
+                *q++='A';
+                *q++='C';
+                *q++='-';
+                *q++='3';
+
+                // AC3 descriptors from https://ffmpeg.org/pipermail/ffmpeg-user/2016-September/033538.html
+                *q++=STREAM_TYPE_AUDIO_AC3;
+                *q++=6;
+                *q++=0x08;
+                *q++=0x28;
+                *q++=0x1B;
+                *q++=0x00;
+                *q++=0x1F;
+                *q++=0x01;
+
             }
             if (st->codecpar->codec_id==AV_CODEC_ID_EAC3 && (ts->flags & MPEGTS_FLAG_SYSTEM_B)) {
                 *q++=0x7a; // EAC3 descriptor see A038 DVB SI
@@ -799,7 +823,7 @@ static int mpegts_init(AVFormatContext *s)
         service->pmt.write_packet = section_write_packet;
         service->pmt.opaque       = s;
         service->pmt.cc           = 15;
-        service->pmt.discontinuity= ts->flags & MPEGTS_FLAG_DISCONT;
+        service->pmt.discontinuity= (ts->flags & MPEGTS_FLAG_DISCONT) && !(ts->flags & MPEGTS_CABLE_LABS);
     } else {
         for (i = 0; i < s->nb_programs; i++) {
             AVProgram *program = s->programs[i];
@@ -818,7 +842,7 @@ static int mpegts_init(AVFormatContext *s)
             service->pmt.write_packet = section_write_packet;
             service->pmt.opaque       = s;
             service->pmt.cc           = 15;
-            service->pmt.discontinuity= ts->flags & MPEGTS_FLAG_DISCONT;
+            service->pmt.discontinuity= (ts->flags & MPEGTS_FLAG_DISCONT) && !(ts->flags & MPEGTS_CABLE_LABS);
             service->program          = program;
         }
     }
@@ -827,13 +851,13 @@ static int mpegts_init(AVFormatContext *s)
     /* Initialize at 15 so that it wraps and is equal to 0 for the
      * first packet we write. */
     ts->pat.cc           = 15;
-    ts->pat.discontinuity= ts->flags & MPEGTS_FLAG_DISCONT;
+    ts->pat.discontinuity= (ts->flags & MPEGTS_FLAG_DISCONT) && !(ts->flags & MPEGTS_CABLE_LABS);
     ts->pat.write_packet = section_write_packet;
     ts->pat.opaque       = s;
 
     ts->sdt.pid          = SDT_PID;
     ts->sdt.cc           = 15;
-    ts->sdt.discontinuity= ts->flags & MPEGTS_FLAG_DISCONT;
+    ts->sdt.discontinuity= (ts->flags & MPEGTS_FLAG_DISCONT) && !(ts->flags & MPEGTS_CABLE_LABS);
     ts->sdt.write_packet = section_write_packet;
     ts->sdt.opaque       = s;
 
@@ -1100,7 +1124,7 @@ static void mpegts_insert_pcr_only(AVFormatContext *s, AVStream *st)
     /* Continuity Count field does not increment (see 13818-1 section 2.4.3.3) */
     *q++ = TS_PACKET_SIZE - 5; /* Adaptation Field Length */
     *q++ = 0x10;               /* Adaptation flags: PCR present */
-    if (ts_st->discontinuity) {
+    if (ts_st->discontinuity && !(ts->flags & MPEGTS_CABLE_LABS)) {
         q[-1] |= 0x80;
         ts_st->discontinuity = 0;
     }
@@ -1174,7 +1198,7 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
     uint8_t buf[TS_PACKET_SIZE];
     uint8_t *q;
     int val, is_start, len, header_len, write_pcr, is_dvb_subtitle, is_dvb_teletext, flags;
-    int afc_len, stuffing_len;
+    uint8_t afc_len, stuffing_len;
     int64_t pcr = -1; /* avoid warning */
     int64_t delay = av_rescale(s->max_delay, 90000, AV_TIME_BASE);
     int force_pat = st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && key && !ts_st->prev_payload_key;
@@ -1183,6 +1207,7 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
     if (ts->flags & MPEGTS_FLAG_PAT_PMT_AT_FRAMES && st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
         force_pat = 1;
     }
+//    av_log(s, AV_LOG_WARNING, "PES payload %d", payload_size);
 
     is_start = 1;
     while (payload_size > 0) {
@@ -1221,19 +1246,30 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
         *q++      = ts_st->pid;
         ts_st->cc = ts_st->cc + 1 & 0xf;
         *q++      = 0x10 | ts_st->cc; // payload indicator + CC
-        if (ts_st->discontinuity) {
+        if (ts_st->discontinuity && !(ts->flags & MPEGTS_CABLE_LABS)) {
             set_af_flag(buf, 0x80);
             q = get_ts_payload_start(buf);
             ts_st->discontinuity = 0;
         }
-        if (key && is_start && pts != AV_NOPTS_VALUE) {
+        if ((key || (ts->flags & MPEGTS_CABLE_LABS)) && is_start && pts != AV_NOPTS_VALUE) {
             // set Random Access for key frames
             if (ts_st->pid == ts_st->service->pcr_pid)
                 write_pcr = 1;
             set_af_flag(buf, 0x40);
             q = get_ts_payload_start(buf);
         }
+
+        // Hack: If we'll end up with just one stuffing byte write the PCR header so that we are not in that situation.
+        if ((ts->flags & MPEGTS_CABLE_LABS) && !write_pcr && !is_start && TS_PACKET_SIZE - (q - buf) - payload_size == 1) {
+            write_pcr = 1;
+        }
+
         if (write_pcr) {
+            if (ts_st->discontinuity && (ts->flags & MPEGTS_CABLE_LABS)) {
+                set_af_flag(buf, 0x80);
+                q = get_ts_payload_start(buf);
+                ts_st->discontinuity = 0;
+            }
             set_af_flag(buf, 0x10);
             q = get_ts_payload_start(buf);
             // add 11, pcr references the last byte of program clock reference base
@@ -1937,6 +1973,9 @@ static const AVOption options[] = {
       AV_OPT_FLAG_ENCODING_PARAM, "mpegts_flags" },
     { "initial_discontinuity", "Mark initial packets as discontinuous",
       0, AV_OPT_TYPE_CONST, { .i64 = MPEGTS_FLAG_DISCONT }, 0, INT_MAX,
+      AV_OPT_FLAG_ENCODING_PARAM, "mpegts_flags" },
+    { "cable_labs", "Output Cable Labs compliant TS",
+      0, AV_OPT_TYPE_CONST, { .i64 = MPEGTS_CABLE_LABS }, 0, INT_MAX,
       AV_OPT_FLAG_ENCODING_PARAM, "mpegts_flags" },
     // backward compatibility
     { "resend_headers", "Reemit PAT/PMT before writing the next packet",

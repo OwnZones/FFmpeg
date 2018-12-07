@@ -159,6 +159,10 @@ static int cache_read(URLContext *h, unsigned char *buf, int size)
     CacheEntry *entry, *next[2] = {NULL, NULL};
     int64_t r;
 
+    if (c->logical_pos == c->end) {
+        return 0;
+    }
+
     entry = av_tree_find(c->root, &c->logical_pos, cmp, (void**)next);
 
     if (!entry)
@@ -192,7 +196,9 @@ static int cache_read(URLContext *h, unsigned char *buf, int size)
     // Cache miss or some kind of fault with the cache
 
     if (c->logical_pos != c->inner_pos) {
+
         r = ffurl_seek(c->inner, c->logical_pos, SEEK_SET);
+
         if (r<0) {
             av_log(h, AV_LOG_ERROR, "Failed to perform internal seek\n");
             return r;

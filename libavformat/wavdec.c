@@ -123,7 +123,12 @@ static int64_t find_tag(WAVDemuxContext * wav, AVIOContext *pb, uint32_t tag1)
         size = next_tag(pb, &tag, wav->rifx);
         if (tag == tag1)
             break;
-        wav_seek_tag(wav, pb, size, SEEK_CUR);
+
+        int64_t res;
+        if ((res = wav_seek_tag(wav, pb, size, SEEK_CUR)) < 0) {
+            av_log(pb, AV_LOG_WARNING, "Failed to perform seek\n");
+            return res;
+        }
     }
     return size;
 }
